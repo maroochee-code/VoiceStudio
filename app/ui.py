@@ -10,7 +10,7 @@ from pathlib import Path
 import app.config  # noqa: F401  (환경변수 먼저 설정)
 import gradio as gr
 
-from app import recorder, sovits, stt, tts, voices
+from app import llm, recorder, sovits, stt, tts, voices
 from app.engine_manager import EngineBusy, EngineManager, build_default_manager
 
 STATUS_HEADERS = ["엔진", "상태", "위치", "자세히"]
@@ -210,6 +210,44 @@ class Handlers:
             raise gr.Error(str(e))
         return str(p), f"저장: {p}"
 
+    # ---------- 음성 대화 (Ollama) ----------
+    def model_choices(self):
+        names = llm.list_models()
+        value = llm.DEFAULT_MODEL if llm.DEFAULT_MODEL in names else (names[0] if names else None)
+        return gr.update(choices=names, value=value)
+
+    def ask(self, user_text: str, history: list | None, model: str | None):
+        """글자 질문 → Ollama 답변. GPU의 다른 엔진은 먼저 내리고, 답변 후 모델은 바로 내려감."""
+        history = list(history or [])
+        try:
+            self.m.load("ollama", will_use_gpu=True, model=model or llm.DEFAULT_MODEL)
+            answer = self.m.get("ollama").chat(history, user_text, model)
+        except (llm.LLMError, EngineBusy) as e:
+            raise gr.Error(str(e))
+        history += [{"role": "user", "content": user_text.strip()},
+                    {"role": "assistant", "content": answer}]
+        return history, answer
+
+    def voice_chat(self, audio_path: str | None, typed: str, history: list | None, model: str | None,
+                   voice_label: str | None, speed: float):
+        """말하기(또는 글자) → 위스퍼 → Ollama 답변 → 선택한 목소리로 읽기."""
+        question = (typed or "").strip()
+        if audio_path and not question:
+            # 대화 중에는 위스퍼를 CPU로: GPU는 Ollama·SoVITS가 번갈아 써야 해서 위스퍼까지 올리면 매번 교체됨
+            try:
+                self.m.load("whisper", will_use_gpu=False, model_size="small", prefer="cpu")
+                question = self.m.get("whisper").transcribe(audio_path)
+            except stt.STTError as e:
+                raise gr.Error(str(e))
+        if not question:
+            raise gr.Error("마이크로 말하거나 질문을 입력하세요.")
+        history, answer = self.ask(question, history, model)
+        audio, msg = self.speak(answer, speed, voice_label, "WAV")
+        return history, audio, None, "", f"질문: {question}\n{msg}"
+
+    def reset_chat(self):
+        return [], None, "대화 기록을 지웠습니다."
+
     # ---------- 엔진 상태 ----------
     def status(self):
         return self.m.status_rows(), self.m.vram_text(), "\n".join(reversed(self.m.log[-10:]))
@@ -332,6 +370,34 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
                 sv_reload.click(h.voice_choices, None, sv_voice)
                 sv_btn.click(h.speak_trained, [sv_text, sv_voice, sv_speed], [sv_audio, sv_msg])
 
+            # ---------------- 음성 대화 ----------------
+            with gr.Tab("음성 대화"):
+                gr.Markdown("말하기 → 위스퍼(글자) → Ollama 답변 → 선택한 목소리로 읽기. "
+                            "답변이 끝나면 대화 AI는 GPU에서 바로 내려갑니다. "
+                            "학습·샘플 목소리는 매번 GPU를 바꿔 쓰느라 멜로보다 느립니다.")
+                with gr.Row():
+                    ch_model = gr.Dropdown(label="대화 AI 모델", choices=[], interactive=True)
+                    ch_voice = gr.Dropdown(label="답변 목소리", choices=["기본 (멜로)"], value="기본 (멜로)",
+                                           interactive=True)
+                    ch_speed = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="속도")
+                    ch_reload = gr.Button("목록 새로고침", scale=0)
+                chatbot = gr.Chatbot(label="대화", height=380)
+                with gr.Row():
+                    ch_mic = gr.Audio(sources=["microphone", "upload"], type="filepath", label="말로 질문")
+                    ch_text = gr.Textbox(label="또는 글자로 질문", lines=3)
+                with gr.Row():
+                    ch_send = gr.Button("보내기", variant="primary")
+                    ch_reset = gr.Button("대화 기록 지우기")
+                ch_audio = gr.Audio(label="답변 음성", type="filepath", autoplay=True, interactive=False)
+                ch_msg = gr.Textbox(label="결과", interactive=False, lines=2)
+
+                ch_send.click(h.voice_chat, [ch_mic, ch_text, chatbot, ch_model, ch_voice, ch_speed],
+                              [chatbot, ch_audio, ch_mic, ch_text, ch_msg])
+                ch_mic.stop_recording(h.voice_chat, [ch_mic, ch_text, chatbot, ch_model, ch_voice, ch_speed],
+                                      [chatbot, ch_audio, ch_mic, ch_text, ch_msg], api_visibility="private")
+                ch_reset.click(h.reset_chat, None, [chatbot, ch_audio, ch_msg])
+                ch_reload.click(h.model_choices, None, ch_model).then(h.voice_labels, None, ch_voice)
+
             # ---------------- 목소리 관리 ----------------
             with gr.Tab("목소리 관리"):
                 vm_table = gr.Dataframe(headers=["목소리", "종류", "출처", "라이선스", "상업적 사용", "메모"],
@@ -373,6 +439,7 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
                     m_off = gr.Button("멜로 끄기")
                     s_on = gr.Button("SoVITS 켜기")
                     s_off = gr.Button("SoVITS 끄기")
+                    o_off = gr.Button("Ollama 모델 내리기")
                     all_off = gr.Button("모두 끄기", variant="stop")
                     refresh = gr.Button("새로고침")
                 log = gr.Textbox(label="최근 기록", lines=6, interactive=False)
@@ -383,6 +450,7 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
                 m_off.click(lambda: h.toggle("melo", False), None, outs)
                 s_on.click(lambda: h.toggle("sovits", True), None, outs)
                 s_off.click(lambda: h.toggle("sovits", False), None, outs)
+                o_off.click(lambda: h.toggle("ollama", False), None, outs)
                 all_off.click(h.unload_all, None, outs)
                 refresh.click(h.status, None, outs)
                 timer = gr.Timer(5)
@@ -394,4 +462,6 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
         demo.load(h.voice_labels, None, tts_voice)
         demo.load(h.voice_labels, None, vm_target)
         demo.load(h.voice_table, None, vm_table)
+        demo.load(h.model_choices, None, ch_model)
+        demo.load(h.voice_labels, None, ch_voice)
     return demo

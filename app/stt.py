@@ -15,16 +15,15 @@ class STTError(Exception):
 
 
 def free_vram_mb() -> int:
-    """현재 남은 VRAM(MB). GPU가 없으면 0."""
-    try:
-        import torch
+    """현재 남은 VRAM(MB). GPU가 없으면 0.
 
-        if not torch.cuda.is_available():
-            return 0
-        free, _ = torch.cuda.mem_get_info(0)
-        return free // (1024 * 1024)
-    except Exception:
-        return 0
+    nvidia-smi로 잰다: torch로 재면 메인 프로그램이 VRAM 약 300MB(CUDA 기본 공간)를 계속 차지해서
+    목소리 학습 때 메모리가 모자랄 수 있음 (버그 기록 006).
+    """
+    from app.engine_manager import vram_info
+
+    v = vram_info()
+    return v["free_mb"] if v["available"] else 0
 
 
 def choose_device(model_size: str, prefer: str = "auto", free_mb: int | None = None) -> tuple[str, str]:

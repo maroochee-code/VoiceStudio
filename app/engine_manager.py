@@ -172,4 +172,7 @@ def build_default_manager() -> EngineManager:
     from app.sovits import SovitsEngine
 
     m.register("sovits", "GPT-SoVITS (학습 목소리)", SovitsEngine())
+    from app.llm import OllamaEngine
+
+    m.register("ollama", "Ollama (대화 AI)", OllamaEngine())
     return m

@@ -328,6 +328,27 @@ class SovitsTrainer:
             for f in (SOVITS_DIR / folder).glob(pattern):
                 f.unlink(missing_ok=True)
 
+    def _log_vram(self) -> None:
+        from app.engine_manager import vram_info
+
+        v = vram_info()
+        if v["available"]:
+            self.log(f"   GPU 남은 메모리: {v['free_mb']:,}MB / {v['total_mb']:,}MB")
+            if v["free_mb"] < 4500:
+                self.log("   ⚠ 남은 GPU 메모리가 적습니다. 브라우저·게임 등 GPU를 쓰는 프로그램을 닫으면 안정적입니다.")
+
+    def _with_retry(self, step: Callable[[], Path]) -> Path:
+        """학습 단계가 GPU 오류로 실패하면 배치 크기를 절반으로 줄여 한 번 더 시도 (버그 기록 006)."""
+        try:
+            return step()
+        except SovitsError:
+            if self.cancelled or self.batch_size <= 1:
+                raise
+            self.batch_size = max(1, self.batch_size // 2)
+            self.log(f"   ⚠ 학습 실패 → 한 번에 학습하는 양(배치 크기)을 {self.batch_size}(으)로 줄여 다시 시도합니다.")
+            self._log_vram()
+            return step()
+
     # ----- 전체
     def run(self, whisper, free_gpu: Callable[[], None]) -> Voice:
         total = self.check()
@@ -337,9 +358,10 @@ class SovitsTrainer:
         n = self.transcribe(clips, whisper)
         self.log(f"   받아쓴 문장 {n}개")
         free_gpu()  # 기획서 5장: 학습 전 위스퍼·Ollama를 GPU에서 내림
+        self._log_vram()
         self.prepare_features()
-        sovits = self.train_sovits()
-        gpt = self.train_gpt()
+        sovits = self._with_retry(self.train_sovits)
+        gpt = self._with_retry(self.train_gpt)
         v = self.register(gpt, sovits)
         self.cleanup()
         self.log(f"총 소요 시간: {(time.time() - t0) / 60:.1f}분")

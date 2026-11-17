@@ -46,6 +46,23 @@ def test_empty_voice_name_rejected():
         sovits.SovitsTrainer("  ")
 
 
+def test_training_step_retries_with_smaller_batch():
+    t = sovits.SovitsTrainer("재시도", log=lambda m: None, batch_size=3)
+    calls = []
+
+    def flaky():
+        calls.append(t.batch_size)
+        if len(calls) == 1:
+            raise sovits.SovitsError("CUDA error")
+        return "ok"
+
+    assert t._with_retry(flaky) == "ok"
+    assert calls == [3, 1]
+    t.batch_size = 1
+    with pytest.raises(sovits.SovitsError):  # 더 줄일 수 없으면 그대로 실패
+        t._with_retry(lambda: (_ for _ in ()).throw(sovits.SovitsError("x")))
+
+
 def test_gpu_job_blocks_gpu_engines():
     from tests.test_stage4_ui import FakeEngine
 
