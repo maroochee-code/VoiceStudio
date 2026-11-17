@@ -1,5 +1,14 @@
 # 변경 기록 (CHANGELOG)
 
+## 1.0.0 — 2026-11-18 (8단계: 마무리)
+### 추가
+- `VoiceStudio.bat` 실행 파일, 바탕화면 바로가기(`scripts/make_shortcut.ps1`), 아이콘(`assets/voicestudio.ico`)
+- 이미 켜져 있으면 새로 켜지 않고 브라우저만 열기
+- 툴을 끄면(창 닫기 포함) GPT-SoVITS 서버·학습 등 하위 프로그램도 함께 종료 (`app/winjob.py`, Ollama 서버는 제외)
+- 모든 버튼 기능의 예상 못 한 오류를 한국어 안내로 표시 (GPU 메모리 부족·연결 실패 등 자주 나오는 오류는 해결 방법 안내)
+- 문서: 사용·기능 설명서(`docs/user-guide.md`), 구성도(`docs/architecture.md`, Mermaid), `README.md`
+- 테스트 11개 추가(코드 안 오류 문구가 모두 한국어인지 자동 검사, 하위 프로세스 정리 확인 등)
+
 ## 0.7.0 — 2026-11-17 (7단계: Ollama 연동 + 음성 대화)
 ### 추가
 - `app/llm.py`: Ollama 서버 확인·자동 실행, 모델 목록, 대화(대화 기록 유지, 음성용 짧은 한국어 답변), 답변 후 keep_alive=0으로 즉시 내림, 읽기 어려운 기호 제거

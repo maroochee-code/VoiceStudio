@@ -1,10 +1,12 @@
-"""웹 화면 (Gradio): 녹음 / 말→글자 / 글자→말 / 엔진 상태.
+"""웹 화면 (Gradio): 녹음 / 말→글자 / 글자→말 / 음성 대화 / 목소리 학습 / 목소리 관리 / 엔진 상태.
 
 실행: .venv\\Scripts\\python.exe -m app.main
 """
 from __future__ import annotations
 
-import shutil
+import functools
+import inspect
+import logging
 from pathlib import Path
 
 import app.config  # noqa: F401  (환경변수 먼저 설정)
@@ -14,8 +16,63 @@ from app import llm, recorder, sovits, stt, tts, voices
 from app.engine_manager import EngineBusy, EngineManager, build_default_manager
 
 STATUS_HEADERS = ["엔진", "상태", "위치", "자세히"]
+log = logging.getLogger("voicestudio")
+
+# 자주 나오는 영어 오류 → 한국어 안내
+ERROR_HINTS = [
+    ("out of memory", "GPU 메모리가 부족합니다. '엔진 상태' 탭에서 '모두 끄기' 후 다시 시도하세요."),
+    ("CUDA", "GPU 작업 중 오류가 났습니다. '엔진 상태' 탭에서 '모두 끄기' 후 다시 시도하세요."),
+    ("Connection refused", "엔진 서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요."),
+    ("timed out", "응답 시간이 너무 오래 걸렸습니다. 잠시 후 다시 시도하세요."),
+    ("No such file", "파일을 찾을 수 없습니다. 파일을 다시 넣어주세요."),
+    ("Permission", "파일에 접근할 권한이 없습니다. 다른 프로그램이 파일을 쓰고 있는지 확인하세요."),
+    ("PortAudio", "오디오 장치 오류입니다. 마이크·스피커 연결을 확인하세요."),
+]
 
 
+def korean_error(e: Exception) -> gr.Error:
+    """예상하지 못한 오류를 한국어 안내로 바꾼다 (원래 내용은 검은 창 기록에 남김)."""
+    msg = str(e)
+    for key, hint in ERROR_HINTS:
+        if key.lower() in msg.lower():
+            return gr.Error(f"{hint}\n(자세한 내용: {msg[:200]})")
+    return gr.Error(f"예상하지 못한 오류가 났습니다: {msg[:200]}\n같은 문제가 반복되면 툴을 껐다 켜주세요.")
+
+
+def _wrap(fn):
+    """버튼 기능에서 나는 모든 오류를 한국어로 보여주게 감싼다."""
+    if inspect.isgeneratorfunction(fn):
+        @functools.wraps(fn)
+        def gen(*args, **kwargs):
+            try:
+                yield from fn(*args, **kwargs)
+            except gr.Error:
+                raise
+            except Exception as e:
+                log.exception("오류")
+                raise korean_error(e) from e
+        return gen
+
+    @functools.wraps(fn)
+    def plain(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except gr.Error:
+            raise
+        except Exception as e:
+            log.exception("오류")
+            raise korean_error(e) from e
+    return plain
+
+
+def korean_errors(cls):
+    for name, fn in list(vars(cls).items()):
+        if callable(fn) and not name.startswith("_"):
+            setattr(cls, name, _wrap(fn))
+    return cls
+
+
+@korean_errors
 class Handlers:
     """버튼이 눌렸을 때 실행되는 기능 모음. 화면과 분리해서 테스트하기 쉽게 한다."""
 

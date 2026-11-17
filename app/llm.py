@@ -63,8 +63,16 @@ def ensure_server(timeout: float = 30) -> str:
     exe = find_ollama_exe()
     if not exe:
         raise LLMError("Ollama가 설치되어 있지 않습니다. https://ollama.com 에서 설치하세요.")
-    subprocess.Popen([exe, "serve"], creationflags=NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    from app.winjob import CREATE_BREAKAWAY_FROM_JOB
+
+    # Ollama는 다른 프로그램과 함께 쓰므로 툴을 꺼도 계속 돌도록 그룹에서 뺀다 (app/winjob.py)
+    flags = NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0)
+    try:
+        subprocess.Popen([exe, "serve"], creationflags=flags | CREATE_BREAKAWAY_FROM_JOB,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        subprocess.Popen([exe, "serve"], creationflags=flags,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if server_running():
