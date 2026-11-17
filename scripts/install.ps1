@@ -43,6 +43,9 @@ uv pip install --python $Py "setuptools<81"
 Step "4. 한국어 형태소 분석기 (engines\mecab_ko, 버그 기록 003)"
 uv pip install --python $Py --target engines\mecab_ko --no-deps python-mecab-ko==1.3.7 python-mecab-ko-dic==2.1.1.post2
 
+Step "4-1. nltk 사전 폴더 (C: 대신 D:에 받도록, 버그 기록 004)"
+New-Item -ItemType Directory -Force "$Root\.venv\nltk_data", "$Root\models\nltk_data" | Out-Null
+
 Step "5. .env 준비"
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 

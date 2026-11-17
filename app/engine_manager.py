@@ -57,11 +57,30 @@ def vram_info() -> dict:
         return {"available": False, "total_mb": 0, "used_mb": 0, "free_mb": 0}
 
 
+class EngineBusy(Exception):
+    """GPU를 다른 작업(목소리 학습 등)이 쓰고 있을 때."""
+
+
 class EngineManager:
     def __init__(self) -> None:
         self.slots: dict[str, EngineSlot] = {}
         self.lock = threading.RLock()  # 버튼을 동시에 눌러도 엔진이 겹쳐 올라가지 않게
         self.log: list[str] = []
+        self.gpu_job: str | None = None  # 예: "목소리 학습" — 이 동안은 GPU 엔진을 켤 수 없음
+
+    # ---------- GPU 독점 작업 (학습) ----------
+    def begin_gpu_job(self, name: str) -> None:
+        with self.lock:
+            if self.gpu_job:
+                raise EngineBusy(f"지금 '{self.gpu_job}' 중이라 시작할 수 없습니다.")
+            self.gpu_job = name
+        self._note(f"{name} 시작")
+
+    def end_gpu_job(self) -> None:
+        with self.lock:
+            if self.gpu_job:
+                self._note(f"{self.gpu_job} 끝")
+            self.gpu_job = None
 
     # ---------- 등록 ----------
     def register(self, key: str, label: str, engine: object) -> None:
@@ -92,6 +111,9 @@ class EngineManager:
         with self.lock:
             slot = self.slots[key]
             use_gpu = will_use_gpu() if callable(will_use_gpu) else will_use_gpu
+            if use_gpu and self.gpu_job and not kwargs.pop("during_job", False):
+                raise EngineBusy(f"지금 '{self.gpu_job}' 중이라 GPU를 쓸 수 없습니다. 끝난 뒤 다시 시도하세요.")
+            kwargs.pop("during_job", None)
             if use_gpu:
                 self.free_gpu(except_key=key)
             status = slot.engine.load(**kwargs)
@@ -129,6 +151,8 @@ class EngineManager:
             return "GPU를 찾을 수 없습니다 (CPU만 사용)"
         pct = 100 * v["used_mb"] / max(v["total_mb"], 1)
         on_gpu = ", ".join(self.gpu_engines()) or "없음"
+        if self.gpu_job:
+            on_gpu += f" · 진행 중: {self.gpu_job}"
         return (f"VRAM 사용 {v['used_mb']:,} / {v['total_mb']:,} MB ({pct:.0f}%) · "
                 f"남은 용량 {v['free_mb']:,} MB · GPU에 올라간 엔진: {on_gpu}")
 
@@ -145,4 +169,7 @@ def build_default_manager() -> EngineManager:
     m = EngineManager()
     m.register("whisper", "위스퍼 (말→글자)", WhisperEngine())
     m.register("melo", "멜로 (글자→말)", MeloEngine())
+    from app.sovits import SovitsEngine
+
+    m.register("sovits", "GPT-SoVITS (학습 목소리)", SovitsEngine())
     return m

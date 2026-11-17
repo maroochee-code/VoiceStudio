@@ -10,8 +10,8 @@ from pathlib import Path
 import app.config  # noqa: F401  (환경변수 먼저 설정)
 import gradio as gr
 
-from app import recorder, stt, tts
-from app.engine_manager import EngineManager, build_default_manager
+from app import recorder, sovits, stt, tts
+from app.engine_manager import EngineBusy, EngineManager, build_default_manager
 
 STATUS_HEADERS = ["엔진", "상태", "위치", "자세히"]
 
@@ -84,6 +84,85 @@ class Handlers:
             raise gr.Error(str(e))
         return str(p), f"저장: {p}"
 
+    # ---------- 목소리 학습 (GPT-SoVITS) ----------
+    def sample_folders(self):
+        from app.config import SAMPLES_DIR
+
+        names = sorted(p.name for p in SAMPLES_DIR.iterdir() if p.is_dir()) if SAMPLES_DIR.is_dir() else []
+        return gr.update(choices=names, value=names[0] if names else None)
+
+    def sample_info(self, folder: str | None):
+        if not folder:
+            return "샘플 폴더가 없습니다. 녹음 탭에서 '학습용 샘플로 보내기'를 먼저 하세요."
+        total = recorder.total_sample_seconds(folder)
+        ok = "✅ 학습 가능" if total >= sovits.MIN_TRAIN_SECONDS else \
+            f"❌ {sovits.MIN_TRAIN_SECONDS - total:.0f}초 더 필요"
+        return f"'{folder}' 샘플 총 {total:.0f}초 · {ok}"
+
+    def voice_choices(self):
+        names = [v.name for v in sovits.list_voices()]
+        return gr.update(choices=names, value=names[-1] if names else None)
+
+    def train_voice(self, voice_name: str, folder: str | None, sovits_epochs: float, gpt_epochs: float):
+        """학습을 별도 스레드에서 돌리고, 진행 기록을 화면에 계속 보여준다(제너레이터)."""
+        import threading
+
+        if not folder:
+            raise gr.Error("학습에 쓸 샘플 폴더를 고르세요.")
+        name = (voice_name or folder).strip()
+        if sovits.find_voice(name):
+            raise gr.Error(f"'{name}' 이름의 목소리가 이미 있습니다. 다른 이름을 쓰세요.")
+        lines: list[str] = []
+        result: dict = {}
+        try:
+            trainer = sovits.SovitsTrainer(name, folder, log=lines.append,
+                                           sovits_epochs=int(sovits_epochs), gpt_epochs=int(gpt_epochs))
+            trainer.check()
+            self.m.begin_gpu_job("목소리 학습")
+        except (sovits.SovitsError, EngineBusy) as e:
+            raise gr.Error(str(e))
+        self.trainer = trainer
+
+        def work():
+            try:
+                self.m.unload("sovits")
+                self.m.load("whisper", will_use_gpu=True, during_job=True, model_size="small", prefer="auto")
+                result["voice"] = trainer.run(self.m.get("whisper"), free_gpu=self.m.free_gpu)
+            except Exception as e:  # 오류는 화면 기록에 남긴다
+                result["error"] = str(e)
+            finally:
+                self.m.end_gpu_job()
+                self.trainer = None
+
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+        while th.is_alive():
+            th.join(timeout=2)
+            yield "\n".join(lines[-300:])
+        if "error" in result:
+            lines.append(f"\n❌ 실패: {result['error']}")
+        else:
+            lines.append(f"\n✅ 완료! '목소리로 읽기'에서 '{result['voice'].name}'를 골라 들어보세요.")
+        yield "\n".join(lines[-300:])
+
+    def cancel_training(self):
+        t = getattr(self, "trainer", None)
+        if t is None:
+            return "진행 중인 학습이 없습니다."
+        t.cancel()
+        return "취소 요청함 (현재 단계를 멈추는 중...)"
+
+    def speak_trained(self, text: str, voice_name: str | None, speed: float):
+        v = sovits.find_voice(voice_name or "")
+        if v is None:
+            raise gr.Error("읽을 목소리를 고르세요. (학습한 목소리가 없으면 먼저 학습하세요)")
+        try:
+            self.m.load("sovits", will_use_gpu=True, voice=v)  # 위스퍼 등 다른 GPU 엔진은 자동으로 내림
+            p = self.m.get("sovits").synthesize_to_file(text, v, speed=float(speed))
+        except (sovits.SovitsError, EngineBusy) as e:
+            raise gr.Error(str(e))
+        return str(p), f"저장: {p}"
+
     # ---------- 엔진 상태 ----------
     def status(self):
         return self.m.status_rows(), self.m.vram_text(), "\n".join(reversed(self.m.log[-10:]))
@@ -93,6 +172,8 @@ class Handlers:
             if on:
                 if key == "whisper":
                     self.m.load("whisper", will_use_gpu=True, model_size="small", prefer="auto")
+                elif key == "sovits":
+                    self.m.load("sovits", will_use_gpu=True)
                 else:
                     self.m.load("melo", will_use_gpu=False, device="cpu")
             else:
@@ -160,6 +241,43 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
                 tts_msg = gr.Textbox(label="결과", interactive=False)
                 tts_btn.click(h.speak, [tts_text, tts_speed], [tts_audio, tts_msg])
 
+            # ---------------- 목소리 학습 ----------------
+            with gr.Tab("목소리 학습"):
+                gr.Markdown("녹음 탭에서 보낸 샘플(1분 이상)로 내 목소리를 학습합니다. "
+                            "학습 중에는 GPU를 다른 엔진이 쓸 수 없습니다. RTX 2060 기준 수 분~수십 분.")
+                with gr.Row():
+                    tr_folder = gr.Dropdown(label="샘플 폴더", choices=[], interactive=True)
+                    tr_reload = gr.Button("목록 새로고침", scale=0)
+                tr_info = gr.Textbox(label="샘플 상태", interactive=False)
+                with gr.Row():
+                    tr_name = gr.Textbox(label="저장할 목소리 이름", placeholder="예: 내목소리")
+                    tr_s2 = gr.Slider(2, 20, value=8, step=1, label="SoVITS 반복 횟수 (음색)")
+                    tr_s1 = gr.Slider(2, 30, value=15, step=1, label="GPT 반복 횟수 (말투)")
+                with gr.Row():
+                    tr_btn = gr.Button("학습 시작", variant="primary")
+                    tr_cancel = gr.Button("학습 취소", variant="stop")
+                tr_log = gr.Textbox(label="진행 기록", lines=14, max_lines=14, autoscroll=True,
+                                    interactive=False)
+
+                gr.Markdown("### 학습한 목소리로 읽기")
+                with gr.Row():
+                    sv_voice = gr.Dropdown(label="목소리", choices=[], interactive=True)
+                    sv_reload = gr.Button("목록 새로고침", scale=0)
+                sv_text = gr.Textbox(label="읽을 문장", lines=3, value="안녕하세요. 제 목소리로 읽어 드립니다.")
+                sv_speed = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="속도")
+                sv_btn = gr.Button("읽기", variant="primary")
+                sv_audio = gr.Audio(label="결과 음성", type="filepath", autoplay=True,
+                                    interactive=False, buttons=["download"])
+                sv_msg = gr.Textbox(label="결과", interactive=False)
+
+                tr_reload.click(h.sample_folders, None, tr_folder)
+                tr_folder.change(h.sample_info, tr_folder, tr_info)
+                tr_btn.click(h.train_voice, [tr_name, tr_folder, tr_s2, tr_s1], tr_log).then(
+                    h.voice_choices, None, sv_voice)
+                tr_cancel.click(h.cancel_training, None, tr_log)
+                sv_reload.click(h.voice_choices, None, sv_voice)
+                sv_btn.click(h.speak_trained, [sv_text, sv_voice, sv_speed], [sv_audio, sv_msg])
+
             # ---------------- 엔진 상태 ----------------
             with gr.Tab("엔진 상태"):
                 vram = gr.Textbox(label="VRAM", interactive=False)
@@ -169,6 +287,8 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
                     w_off = gr.Button("위스퍼 끄기")
                     m_on = gr.Button("멜로 켜기")
                     m_off = gr.Button("멜로 끄기")
+                    s_on = gr.Button("SoVITS 켜기")
+                    s_off = gr.Button("SoVITS 끄기")
                     all_off = gr.Button("모두 끄기", variant="stop")
                     refresh = gr.Button("새로고침")
                 log = gr.Textbox(label="최근 기록", lines=6, interactive=False)
@@ -177,10 +297,14 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
                 w_off.click(lambda: h.toggle("whisper", False), None, outs)
                 m_on.click(lambda: h.toggle("melo", True), None, outs)
                 m_off.click(lambda: h.toggle("melo", False), None, outs)
+                s_on.click(lambda: h.toggle("sovits", True), None, outs)
+                s_off.click(lambda: h.toggle("sovits", False), None, outs)
                 all_off.click(h.unload_all, None, outs)
                 refresh.click(h.status, None, outs)
                 timer = gr.Timer(5)
                 timer.tick(h.status, None, outs, api_visibility="private")
 
         demo.load(h.status, None, [table, vram, log])
+        demo.load(h.sample_folders, None, tr_folder)
+        demo.load(h.voice_choices, None, sv_voice)
     return demo

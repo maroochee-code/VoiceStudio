@@ -68,7 +68,7 @@ D:\Github\VoiceStudio\
 ### 5단계: 목소리 학습 GPT-SoVITS (0.5.0)
 - D:에 GPT-SoVITS 설치(별도 환경), 샘플 정리 → 학습 → 이름 붙여 저장
 - 학습 전 위스퍼·Ollama 자동 언로드
-- 다운로드: 약 5~10GB(**확인 필요**) / 학습 시간: RTX 2060에서 수십 분 예상(**확인 필요**)
+- 실제: 다운로드 약 3GB(패키지) + 1.6GB(사전 학습 모델), v2Pro 사용 — `docs/decisions/003-gpt-sovits-setup.md`
 
 ### 6단계: 목소리 선택 + 샘플 목소리 (0.6.0)
 - 목소리 목록(기본/학습/샘플), `data/voices/samples/` 폴더 + 라이선스 메모 파일
