@@ -19,6 +19,10 @@ os.environ.setdefault("HF_HOME", str(PROJECT_ROOT / "models" / "huggingface"))
 os.environ.setdefault("NLTK_DATA", str(PROJECT_ROOT / "models" / "nltk_data"))
 os.environ.setdefault("CACHED_PATH_CACHE_ROOT", str(PROJECT_ROOT / "models" / "cached_path"))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+# Gradio: 인터넷으로 사용 통계 보내지 않기, 브라우저 녹음 임시파일을 C:\Temp 대신 D:에
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+os.environ.setdefault("GRADIO_TEMP_DIR", str(PROJECT_ROOT / "data" / "tmp"))
+Path(os.environ["GRADIO_TEMP_DIR"]).mkdir(parents=True, exist_ok=True)
 # nltk는 지정 폴더가 '이미 있어야' 거기에 받는다. 없으면 C:\Users\...\AppData로 가버리므로 미리 만든다.
 Path(os.environ["NLTK_DATA"]).mkdir(parents=True, exist_ok=True)
 
