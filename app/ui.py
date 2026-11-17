@@ -10,7 +10,7 @@ from pathlib import Path
 import app.config  # noqa: F401  (환경변수 먼저 설정)
 import gradio as gr
 
-from app import recorder, sovits, stt, tts
+from app import recorder, sovits, stt, tts, voices
 from app.engine_manager import EngineBusy, EngineManager, build_default_manager
 
 STATUS_HEADERS = ["엔진", "상태", "위치", "자세히"]
@@ -74,15 +74,62 @@ class Handlers:
         p = stt.save_transcript(text)
         return str(p)
 
-    # ---------- 글자 → 말 ----------
-    def speak(self, text: str, speed: float):
+    # ---------- 글자 → 말 (목소리 선택) ----------
+    def speak(self, text: str, speed: float, voice_label: str | None = None, fmt: str = "WAV"):
+        entry = voices.find(voice_label or voices.MELO_ID)
+        if entry is None:
+            raise gr.Error("목소리 목록에서 목소리를 다시 고르세요 (목록 새로고침).")
         try:
-            if not self.m.get("melo").loaded:
-                self.m.load("melo", will_use_gpu=False, device="cpu")
-            p = self.m.get("melo").synthesize_to_file(text, speed=float(speed))
-        except tts.TTSError as e:
+            if entry.kind == "melo":
+                if not self.m.get("melo").loaded:
+                    self.m.load("melo", will_use_gpu=False, device="cpu")
+                p = self.m.get("melo").synthesize_to_file(text, speed=float(speed))
+            else:
+                v = voices.to_sovits_voice(entry)
+                self.m.load("sovits", will_use_gpu=True, voice=v)  # 위스퍼 등은 자동으로 GPU에서 내림
+                p = self.m.get("sovits").synthesize_to_file(text, v, speed=float(speed))
+            if fmt == "MP3":
+                p = voices.to_mp3(p)
+        except (tts.TTSError, sovits.SovitsError, voices.VoiceError, EngineBusy) as e:
             raise gr.Error(str(e))
-        return str(p), f"저장: {p}"
+        lic = entry.license
+        note = f" · 라이선스: {lic.license or '미기록'} (상업적 사용 {lic.commercial})" if lic else ""
+        return str(p), f"[{entry.label}] 저장: {p}{note}"
+
+    def voice_labels(self):
+        labels = [e.label for e in voices.list_all()]
+        return gr.update(choices=labels, value=labels[0])
+
+    # ---------- 목소리 관리 ----------
+    def voice_table(self):
+        rows = []
+        for e in voices.list_all():
+            lic = e.license or voices.License()
+            rows.append([e.label, {"melo": "기본", "trained": "학습", "sample": "샘플"}[e.kind],
+                         lic.source, lic.license, lic.commercial, lic.memo])
+        return rows
+
+    def add_sample(self, name, audio_path, ref_text, source, license_name, commercial, memo):
+        text = (ref_text or "").strip()
+        if audio_path and not text:  # 문장을 비워두면 위스퍼로 받아쓰기
+            try:
+                self.m.load("whisper", will_use_gpu=True, model_size="small", prefer="auto")
+                text = self.m.get("whisper").transcribe(audio_path)
+            except (stt.STTError, EngineBusy) as e:
+                raise gr.Error(str(e))
+        try:
+            folder = voices.add_sample_voice(name, audio_path, text,
+                                             voices.License(source, license_name, commercial, memo))
+        except voices.VoiceError as e:
+            raise gr.Error(str(e))
+        return f"등록 완료: {folder}\n참고 문장: {text}", self.voice_table()
+
+    def edit_license(self, voice_label, source, license_name, commercial, memo):
+        try:
+            voices.update_license(voice_label, voices.License(source, license_name, commercial, memo))
+        except voices.VoiceError as e:
+            raise gr.Error(str(e))
+        return "라이선스 메모 저장 완료", self.voice_table()
 
     # ---------- 목소리 학습 (GPT-SoVITS) ----------
     def sample_folders(self):
@@ -232,14 +279,21 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
 
             # ---------------- 글자 → 말 ----------------
             with gr.Tab("글자 → 말"):
+                with gr.Row():
+                    tts_voice = gr.Dropdown(label="목소리 (기본 / 학습 / 샘플)", choices=["기본 (멜로)"],
+                                            value="기본 (멜로)", interactive=True)
+                    tts_voice_reload = gr.Button("목록 새로고침", scale=0)
                 tts_text = gr.Textbox(label="읽을 문장", lines=4,
                                       value="안녕하세요. 보이스 스튜디오입니다.")
-                tts_speed = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="속도")
-                tts_btn = gr.Button("읽기 (멜로 기본 목소리)", variant="primary")
+                with gr.Row():
+                    tts_speed = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="속도")
+                    tts_fmt = gr.Radio(["WAV", "MP3"], value="WAV", label="저장 형식")
+                tts_btn = gr.Button("읽기", variant="primary")
                 tts_audio = gr.Audio(label="결과 음성", type="filepath", autoplay=True,
                                      interactive=False, buttons=["download"])
                 tts_msg = gr.Textbox(label="결과", interactive=False)
-                tts_btn.click(h.speak, [tts_text, tts_speed], [tts_audio, tts_msg])
+                tts_btn.click(h.speak, [tts_text, tts_speed, tts_voice, tts_fmt], [tts_audio, tts_msg])
+                tts_voice_reload.click(h.voice_labels, None, tts_voice)
 
             # ---------------- 목소리 학습 ----------------
             with gr.Tab("목소리 학습"):
@@ -278,6 +332,36 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
                 sv_reload.click(h.voice_choices, None, sv_voice)
                 sv_btn.click(h.speak_trained, [sv_text, sv_voice, sv_speed], [sv_audio, sv_msg])
 
+            # ---------------- 목소리 관리 ----------------
+            with gr.Tab("목소리 관리"):
+                vm_table = gr.Dataframe(headers=["목소리", "종류", "출처", "라이선스", "상업적 사용", "메모"],
+                                        interactive=False, wrap=True)
+                vm_reload = gr.Button("목록 새로고침")
+                gr.Markdown("### 샘플 목소리 추가\n3~10초짜리 한 문장 음성을 넣으면, 학습 없이 그 목소리를 흉내 내 읽습니다. "
+                            "무료 샘플 예: KSS 데이터셋(CC BY-NC-SA 4.0, **상업적 사용 불가**), "
+                            "AI 허브(데이터마다 다름, 확인 필요). 자세한 안내: `data/voices/samples/_README.txt`")
+                with gr.Row():
+                    vm_name = gr.Textbox(label="목소리 이름")
+                    vm_audio = gr.Audio(sources=["upload", "microphone"], type="filepath", label="참고 음성 (3~10초)")
+                vm_text = gr.Textbox(label="참고 음성에서 말한 문장 (비워두면 위스퍼가 받아씀)")
+                with gr.Row():
+                    vm_source = gr.Textbox(label="출처", placeholder="예: KSS 데이터셋 (Kyubyong Park)")
+                    vm_license = gr.Textbox(label="라이선스", placeholder="예: CC BY-NC-SA 4.0")
+                    vm_commercial = gr.Dropdown(voices.COMMERCIAL_CHOICES, value="확인 필요", label="상업적 사용")
+                vm_memo = gr.Textbox(label="메모")
+                vm_add = gr.Button("샘플 목소리 등록", variant="primary")
+                gr.Markdown("### 라이선스 메모 고치기 (학습·샘플 목소리)")
+                vm_target = gr.Dropdown(label="목소리", choices=[], interactive=True)
+                vm_edit = gr.Button("위 출처·라이선스·상업적 사용·메모로 저장")
+                vm_msg = gr.Textbox(label="결과", interactive=False, lines=2)
+
+                vm_reload.click(h.voice_table, None, vm_table).then(h.voice_labels, None, vm_target)
+                vm_add.click(h.add_sample, [vm_name, vm_audio, vm_text, vm_source, vm_license, vm_commercial,
+                                            vm_memo], [vm_msg, vm_table]).then(
+                    h.voice_labels, None, tts_voice).then(h.voice_labels, None, vm_target)
+                vm_edit.click(h.edit_license, [vm_target, vm_source, vm_license, vm_commercial, vm_memo],
+                              [vm_msg, vm_table])
+
             # ---------------- 엔진 상태 ----------------
             with gr.Tab("엔진 상태"):
                 vram = gr.Textbox(label="VRAM", interactive=False)
@@ -307,4 +391,7 @@ def build_ui(handlers: Handlers | None = None) -> gr.Blocks:
         demo.load(h.status, None, [table, vram, log])
         demo.load(h.sample_folders, None, tr_folder)
         demo.load(h.voice_choices, None, sv_voice)
+        demo.load(h.voice_labels, None, tts_voice)
+        demo.load(h.voice_labels, None, vm_target)
+        demo.load(h.voice_table, None, vm_table)
     return demo

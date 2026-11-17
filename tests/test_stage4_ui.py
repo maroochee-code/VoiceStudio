@@ -120,7 +120,7 @@ def test_web_server_and_buttons(handlers, korean_wav):
         client = Client("http://127.0.0.1:7861/", verbose=False)
         text, _ = client.predict(handle_file(str(korean_wav)), "small", "자동", api_name="/transcribe")
         assert "날씨" in text
-        audio, _ = client.predict("웹 화면 테스트입니다.", 1.0, api_name="/speak")
+        audio, _ = client.predict("웹 화면 테스트입니다.", 1.0, "기본 (멜로)", "WAV", api_name="/speak")
         assert str(audio).endswith(".wav")
     finally:
         demo.close()

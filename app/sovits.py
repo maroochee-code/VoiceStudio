@@ -420,11 +420,12 @@ class SovitsEngine:
         return self.status()
 
     def set_voice(self, voice: Voice) -> None:
-        if self.voice and self.voice.exp_id == voice.exp_id:
-            return
-        self._get("/set_gpt_weights", timeout=120, weights_path=voice.gpt_path)
-        self._get("/set_sovits_weights", timeout=120, weights_path=voice.sovits_path)
-        self.voice = voice
+        cur = self.voice
+        if cur is None or cur.gpt_path != voice.gpt_path:
+            self._get("/set_gpt_weights", timeout=120, weights_path=voice.gpt_path)
+        if cur is None or cur.sovits_path != voice.sovits_path:
+            self._get("/set_sovits_weights", timeout=120, weights_path=voice.sovits_path)
+        self.voice = voice  # 참고 음성은 합성 요청마다 따로 보내므로 가중치가 같으면 다시 불러올 필요 없음
 
     def unload(self) -> None:
         if self.proc is None:
