@@ -6,7 +6,6 @@ import pytest
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.gpu_check import get_gpu_info  # noqa: E402
 
