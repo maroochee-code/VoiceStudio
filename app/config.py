@@ -16,6 +16,11 @@ except ImportError:
 
 # .env가 없어도 C:에 쌓이지 않도록 기본값을 D: 프로젝트 폴더로 강제
 os.environ.setdefault("HF_HOME", str(PROJECT_ROOT / "models" / "huggingface"))
+os.environ.setdefault("NLTK_DATA", str(PROJECT_ROOT / "models" / "nltk_data"))
+os.environ.setdefault("CACHED_PATH_CACHE_ROOT", str(PROJECT_ROOT / "models" / "cached_path"))
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+# nltk는 지정 폴더가 '이미 있어야' 거기에 받는다. 없으면 C:\Users\...\AppData로 가버리므로 미리 만든다.
+Path(os.environ["NLTK_DATA"]).mkdir(parents=True, exist_ok=True)
 
 DATA_DIR = PROJECT_ROOT / "data"
 MODELS_DIR = PROJECT_ROOT / "models"

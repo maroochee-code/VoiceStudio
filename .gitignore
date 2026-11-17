@@ -29,3 +29,6 @@ data/
 
 # Claude Code 임시 파일
 .claude/*.lock
+
+# 외부 엔진 소스 (따로 받음)
+engines/
